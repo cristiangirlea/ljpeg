@@ -9,58 +9,73 @@ import (
 	"image/color"
 )
 
+// A lossless image is decoded into one plane of samples per component. The
+// samples are reconstructed as coded, before the point transform is undone.
+type losslessPlane struct {
+	pix     []uint16 // Row-major samples, grown one row at a time as decoded.
+	pt      uint8    // Point transform, as per section H.1.2.1.
+	decoded bool
+}
+
 // processLosslessSOS decodes a lossless scan, as specified in Annex H. Each
 // sample is coded as the difference from a prediction made from its
 // already-decoded neighbors: Ra to the left, Rb above and Rc above-left.
-func (d *decoder) processLosslessSOS(scan []scanComponent, ps, pt uint8) error {
-	if ps < 1 || 7 < ps {
+func (d *decoder) processLosslessSOS(scan []scanComponent, ss, se, ahal uint8) error {
+	// Table H.2: Ss is the predictor, Se is 0, Ah is 0 and Al is the point
+	// transform.
+	if ss < 1 || 7 < ss {
 		return FormatError("bad predictor selection value")
 	}
+	if se != 0 || ahal>>4 != 0 {
+		return FormatError("bad lossless scan parameters")
+	}
+	pt := ahal & 0x0f
 	if int(pt) >= d.precision {
 		return FormatError("bad point transform")
 	}
-	if len(scan) > 1 {
-		// Interleaved scans are only supported without subsampling, so that
-		// each MCU is one sample of each component.
-		for _, sc := range scan {
-			if c := d.comp[sc.compIndex]; c.h != 1 || c.v != 1 {
-				return UnsupportedError("subsampled lossless image")
-			}
+	w, h := d.width, d.height
+	for _, sc := range scan {
+		if d.lsPlanes[sc.compIndex].decoded {
+			return FormatError("repeated lossless scan")
 		}
 	}
-	w, h := d.width, d.height
-	if w <= 0 || h <= 0 {
-		return FormatError("bad image dimensions")
+	// Section H.1.1: in lossless mode, the restart interval is a multiple of
+	// the number of MCUs in a row. Each MCU here is one sample per component.
+	if d.ri%w != 0 {
+		return FormatError("bad restart interval")
 	}
 	for _, sc := range scan {
-		if d.lsPix[sc.compIndex] == nil {
-			d.lsPix[sc.compIndex] = make([]uint16, w*h)
-		}
+		p := &d.lsPlanes[sc.compIndex]
+		p.pix, p.pt = make([]uint16, 0, w), pt
 	}
 
 	// The first sample of a scan or restart interval is predicted from
-	// 1<<(P-Pt-1), the rest of that line from Ra, and the first sample of
-	// every other line from Rb, as per section H.1.2.1.
+	// 1<<(P-Pt-1), the rest of that row from Ra, and the first sample of
+	// every other row from Rb, as per section H.1.2.1.
 	initial := int32(1) << (d.precision - int(pt) - 1)
-	start, startRow := 0, 0
+	startRow := 0
 
 	d.bits = bits{}
-	mcu, expectedRST := 0, uint8(rst0Marker)
+	expectedRST := uint8(rst0Marker)
 	for y := 0; y < h; y++ {
+		for _, sc := range scan {
+			p := &d.lsPlanes[sc.compIndex]
+			p.pix = append(p.pix, make([]uint16, w)...)
+		}
 		for x := 0; x < w; x++ {
 			i := y*w + x
 			for _, sc := range scan {
-				pix := d.lsPix[sc.compIndex]
+				pix := d.lsPlanes[sc.compIndex].pix
 				var pred int32
 				switch {
-				case i == start:
+				case y == startRow && x == 0:
 					pred = initial
 				case y == startRow:
 					pred = int32(pix[i-1])
 				case x == 0:
 					pred = int32(pix[i-w])
 				default:
-					pred = predict(ps, pix[i-1], pix[i-w], pix[i-w-1])
+					pred = predict(ss, pix[i-1], pix[i-w], pix[i-w-1])
 				}
 
 				t, err := d.decodeHuffman(&d.huff[dcTable][sc.td])
@@ -83,26 +98,26 @@ func (d *decoder) processLosslessSOS(scan []scanComponent, ps, pt uint8) error {
 				// Samples are reconstructed modulo 2^16 (section H.1.2.1).
 				pix[i] = uint16(pred + diff)
 			}
-
-			mcu++
-			if d.ri > 0 && mcu%d.ri == 0 && mcu < w*h {
-				if err := d.readFull(d.tmp[:2]); err != nil {
+		}
+		if d.ri > 0 && (y+1)*w%d.ri == 0 && y+1 < h {
+			if err := d.readFull(d.tmp[:2]); err != nil {
+				return err
+			} else if d.tmp[0] != 0xff || d.tmp[1] != expectedRST {
+				if err := d.findRST(expectedRST); err != nil {
 					return err
-				} else if d.tmp[0] != 0xff || d.tmp[1] != expectedRST {
-					if err := d.findRST(expectedRST); err != nil {
-						return err
-					}
 				}
-				expectedRST++
-				if expectedRST == rst7Marker+1 {
-					expectedRST = rst0Marker
-				}
-				d.bits = bits{}
-				start, startRow = mcu, mcu/w
 			}
+			expectedRST++
+			if expectedRST == rst7Marker+1 {
+				expectedRST = rst0Marker
+			}
+			d.bits = bits{}
+			startRow = y + 1
 		}
 	}
-	d.lsShift = pt
+	for _, sc := range scan {
+		d.lsPlanes[sc.compIndex].decoded = true
+	}
 	return nil
 }
 
@@ -127,59 +142,60 @@ func predict(ps uint8, a, b, c uint16) int32 {
 	return (ra + rb) >> 1
 }
 
-// losslessImage returns the decoded lossless samples as an image. Samples
-// with more than 8 bits are scaled to 16 bits; others are scaled to 8 bits.
+// losslessImage returns the decoded lossless samples as an image. Like
+// image/png, samples are scaled to the full 8-bit or 16-bit range, so that
+// the maximum sample value maps to white.
 func (d *decoder) losslessImage() (image.Image, error) {
+	if d.nComp != 1 && d.nComp != 3 {
+		return nil, UnsupportedError("lossless image with this number of components")
+	}
 	for i := 0; i < d.nComp; i++ {
-		if d.lsPix[i] == nil {
+		if !d.lsPlanes[i].decoded {
 			return nil, FormatError("missing SOS marker")
 		}
 	}
 	w, h := d.width, d.height
 	r := image.Rect(0, 0, w, h)
-	// sample returns component c of pixel i, shifted to bits significant bits.
-	sample := func(c, i, bits int) uint16 {
-		v := uint32(d.lsPix[c][i]) << d.lsShift & (1<<d.precision - 1)
-		if bits >= d.precision {
-			return uint16(v << (bits - d.precision))
-		}
-		return uint16(v >> (d.precision - bits))
+	maxSample := uint32(1)<<d.precision - 1
+	// sample returns component c of pixel i, scaled to the range 0..maxOut.
+	sample := func(c, i int, maxOut uint32) uint16 {
+		p := &d.lsPlanes[c]
+		v := uint32(p.pix[i]) << p.pt & maxSample
+		return uint16(v * maxOut / maxSample)
 	}
 	switch {
 	case d.nComp == 1 && d.precision <= 8:
 		m := image.NewGray(r)
 		for i := range m.Pix {
-			m.Pix[i] = uint8(sample(0, i, 8))
+			m.Pix[i] = uint8(sample(0, i, 0xff))
 		}
 		return m, nil
 	case d.nComp == 1:
 		m := image.NewGray16(r)
 		for i := 0; i < w*h; i++ {
-			v := sample(0, i, 16)
+			v := sample(0, i, 0xffff)
 			m.Pix[2*i], m.Pix[2*i+1] = uint8(v>>8), uint8(v)
 		}
 		return m, nil
-	case d.nComp == 3 && d.precision <= 8:
+	case d.precision <= 8:
 		m := image.NewRGBA(r)
 		for i := 0; i < w*h; i++ {
-			m.Pix[4*i+0] = uint8(sample(0, i, 8))
-			m.Pix[4*i+1] = uint8(sample(1, i, 8))
-			m.Pix[4*i+2] = uint8(sample(2, i, 8))
+			m.Pix[4*i+0] = uint8(sample(0, i, 0xff))
+			m.Pix[4*i+1] = uint8(sample(1, i, 0xff))
+			m.Pix[4*i+2] = uint8(sample(2, i, 0xff))
 			m.Pix[4*i+3] = 0xff
 		}
 		return m, nil
-	case d.nComp == 3:
-		m := image.NewRGBA64(r)
-		for i := 0; i < w*h; i++ {
-			for c := 0; c < 3; c++ {
-				v := sample(c, i, 16)
-				m.Pix[8*i+2*c], m.Pix[8*i+2*c+1] = uint8(v>>8), uint8(v)
-			}
-			m.Pix[8*i+6], m.Pix[8*i+7] = 0xff, 0xff
-		}
-		return m, nil
 	}
-	return nil, UnsupportedError("lossless image with this number of components")
+	m := image.NewRGBA64(r)
+	for i := 0; i < w*h; i++ {
+		for c := 0; c < 3; c++ {
+			v := sample(c, i, 0xffff)
+			m.Pix[8*i+2*c], m.Pix[8*i+2*c+1] = uint8(v>>8), uint8(v)
+		}
+		m.Pix[8*i+6], m.Pix[8*i+7] = 0xff, 0xff
+	}
+	return m, nil
 }
 
 // losslessColorModel returns the color model of the image returned by

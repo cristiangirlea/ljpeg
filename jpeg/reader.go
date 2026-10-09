@@ -143,9 +143,8 @@ type decoder struct {
 	progressive bool
 	lossless    bool
 
-	precision int                     // Sample precision in bits, as per section B.2.2.
-	lsPix     [maxComponents][]uint16 // Lossless samples, one plane per component.
-	lsShift   uint8                   // Lossless point transform.
+	precision int // Sample precision in bits, as per section B.2.2.
+	lsPlanes  [maxComponents]losslessPlane
 
 	jfif                bool
 	adobeTransformValid bool
@@ -317,6 +316,11 @@ func (d *decoder) processSOF(n int) error {
 	switch n {
 	case 6 + 3*1: // Grayscale image.
 		d.nComp = 1
+	case 6 + 3*2: // Two components, only in lossless images.
+		if !d.lossless {
+			return UnsupportedError("number of components")
+		}
+		d.nComp = 2
 	case 6 + 3*3: // YCbCr or RGB image.
 		d.nComp = 3
 	case 6 + 3*4: // YCbCrK or CMYK image.
@@ -334,14 +338,14 @@ func (d *decoder) processSOF(n int) error {
 		if d.precision < 2 || 16 < d.precision {
 			return FormatError("bad precision")
 		}
-		if d.nComp == 4 {
-			return UnsupportedError("lossless 4-component image")
-		}
 	} else if d.precision != 8 {
 		return UnsupportedError("precision")
 	}
 	d.height = int(d.tmp[1])<<8 + int(d.tmp[2])
 	d.width = int(d.tmp[3])<<8 + int(d.tmp[4])
+	if d.lossless && (d.width == 0 || d.height == 0) {
+		return FormatError("bad image dimensions")
+	}
 	if int(d.tmp[5]) != d.nComp {
 		return FormatError("SOF has wrong length")
 	}
@@ -365,6 +369,16 @@ func (d *decoder) processSOF(n int) error {
 		h, v := int(hv>>4), int(hv&0x0f)
 		if h < 1 || 4 < h || v < 1 || 4 < v {
 			return FormatError("luma/chroma subsampling ratio")
+		}
+		if d.lossless {
+			// Subsampled lossless images (section A.1.1) are not supported.
+			// For a single component, the sampling factors are irrelevant.
+			if d.nComp > 1 && hv != 0x11 {
+				return UnsupportedError("subsampled lossless image")
+			}
+			d.comp[i].h, d.comp[i].v = 1, 1
+			d.maxH, d.maxV = 1, 1
+			continue
 		}
 		if h == 3 || v == 3 {
 			return errUnsupportedSubsamplingRatio

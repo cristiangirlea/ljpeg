@@ -116,7 +116,7 @@ func (d *decoder) processSOS(n int) error {
 	if d.lossless {
 		// For lossless scans, Ss is the predictor and Al is the point
 		// transform, as per table H.2.
-		return d.processLosslessSOS(scan[:nComp], d.tmp[1+2*nComp], d.tmp[3+2*nComp]&0x0f)
+		return d.processLosslessSOS(scan[:nComp], d.tmp[1+2*nComp], d.tmp[2+2*nComp], d.tmp[3+2*nComp])
 	}
 	// Section B.2.3 states that if there is more than one component then the
 	// total H*V values in a scan must be <= 10.
