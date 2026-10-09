@@ -57,6 +57,12 @@ func (d *decoder) makeImg(mxx, myy int) {
 }
 
 // Specified in section B.2.3.
+type scanComponent struct {
+	compIndex uint8
+	td        uint8 // DC table selector.
+	ta        uint8 // AC table selector.
+}
+
 func (d *decoder) processSOS(n int) error {
 	if d.nComp == 0 {
 		return FormatError("missing SOF marker")
@@ -71,11 +77,7 @@ func (d *decoder) processSOS(n int) error {
 	if n != 4+2*nComp {
 		return FormatError("SOS length inconsistent with number of components")
 	}
-	var scan [maxComponents]struct {
-		compIndex uint8
-		td        uint8 // DC table selector.
-		ta        uint8 // AC table selector.
-	}
+	var scan [maxComponents]scanComponent
 	totalHV := 0
 	for i := 0; i < nComp; i++ {
 		cs := d.tmp[1+2*i] // Component selector.
@@ -110,6 +112,11 @@ func (d *decoder) processSOS(n int) error {
 		if t := scan[i].ta; t > maxTh || (d.baseline && t > 1) {
 			return FormatError("bad Ta value")
 		}
+	}
+	if d.lossless {
+		// For lossless scans, Ss is the predictor and Al is the point
+		// transform, as per table H.2.
+		return d.processLosslessSOS(scan[:nComp], d.tmp[1+2*nComp], d.tmp[3+2*nComp]&0x0f)
 	}
 	// Section B.2.3 states that if there is more than one component then the
 	// total H*V values in a scan must be <= 10.
