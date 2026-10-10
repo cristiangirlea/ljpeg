@@ -45,11 +45,15 @@ func run(args []string) error {
 			return err
 		}
 		defer f.Close()
-		planes, w, h, _, err := jpeg.DecodeLosslessPlanes(bufio.NewReader(f))
+		m, err := jpeg.DecodeLossless(bufio.NewReader(f))
 		if err != nil {
 			return err
 		}
-		return writePAM(args[2], planes, w, h, precision)
+		planes := make([][]uint16, len(m.Components))
+		for i, c := range m.Components {
+			planes[i] = c.Samples
+		}
+		return writePAM(args[2], planes, m.Width, m.Height, precision)
 	}
 	if len(args) >= 6 && args[0] == "encpam" {
 		planes, w, h, precision, err := readPAM(args[1])
@@ -64,7 +68,7 @@ func run(args []string) error {
 			return err
 		}
 		defer out.Close()
-		return jpeg.EncodeLosslessPlanes(out, planes, w, h, precision, psv, pt, rst, len(args) > 6 && args[6] == "separate")
+		return encode(out, planes, w, h, precision, psv, pt, rst, len(args) > 6 && args[6] == "separate")
 	}
 	if len(args) >= 6 && args[0] == "enc" {
 		planes, w, h, precision, err := readPNM(args[1])
@@ -79,7 +83,7 @@ func run(args []string) error {
 			return err
 		}
 		defer out.Close()
-		return jpeg.EncodeLosslessPlanes(out, planes, w, h, precision, psv, pt, rst, len(args) > 6 && args[6] == "separate")
+		return encode(out, planes, w, h, precision, psv, pt, rst, len(args) > 6 && args[6] == "separate")
 	}
 	return fmt.Errorf("usage: ljpegtool dec in.jpg out.pnm P | decraw in.jpg out.pam P | enc in.pnm out.jpg PSV PT RESTARTROWS [separate]")
 }
@@ -242,4 +246,12 @@ body:
 		}
 	}
 	return planes, w, h, precision, nil
+}
+
+func encode(out *os.File, planes [][]uint16, w, h, precision, psv, pt, rst int, separate bool) error {
+	m := &jpeg.Lossless{Width: w, Height: h, Precision: precision}
+	for i, p := range planes {
+		m.Components = append(m.Components, jpeg.LosslessComponent{ID: uint8(i + 1), Samples: p})
+	}
+	return jpeg.EncodeLossless(out, m, &jpeg.LosslessOptions{Predictor: psv, PointTransform: pt, RestartRows: rst, SeparateScans: separate})
 }
