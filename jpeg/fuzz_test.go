@@ -18,19 +18,21 @@ func FuzzDecode(f *testing.F) {
 		f.Skip("Skipping in short mode")
 	}
 
-	testdata, err := os.ReadDir("../testdata")
-	if err != nil {
-		f.Fatalf("failed to read testdata directory: %s", err)
-	}
-	for _, de := range testdata {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".jpeg") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join("../testdata", de.Name()))
+	for _, dir := range []string{"../testdata", "../testdata/lossless"} {
+		testdata, err := os.ReadDir(dir)
 		if err != nil {
-			f.Fatalf("failed to read testdata: %s", err)
+			f.Fatalf("failed to read testdata directory: %s", err)
 		}
-		f.Add(b)
+		for _, de := range testdata {
+			if de.IsDir() || !strings.HasSuffix(de.Name(), ".jpeg") {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(dir, de.Name()))
+			if err != nil {
+				f.Fatalf("failed to read testdata: %s", err)
+			}
+			f.Add(b)
+		}
 	}
 
 	f.Fuzz(func(t *testing.T, b []byte) {

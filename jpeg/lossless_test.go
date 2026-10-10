@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/png"
 	"math/rand/v2"
+	"os"
 	"testing"
 )
 
@@ -354,5 +356,88 @@ func TestLosslessHugeHeader(t *testing.T) {
 	// this did not run out of memory, but also check nothing excessive.
 	if allocs > 1000 {
 		t.Errorf("too many allocations: %v", allocs)
+	}
+}
+
+// TestDecodeLosslessFiles decodes the lossless files in testdata/lossless,
+// which were generated from the upstream PNG images, and compares them with
+// those images.
+func TestDecodeLosslessFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name, golden string
+		pt           uint
+	}{
+		{"video-005.gray.psv1.jpeg", "video-005.gray.png", 0},
+		{"video-005.gray.psv7.rst.jpeg", "video-005.gray.png", 0},
+		{"video-001.rgb.psv4.jpeg", "video-001.png", 0},
+		{"video-001.rgb.psv6.sep.jpeg", "video-001.png", 0},
+		{"video-001.rgb.psv1.pt2.jpeg", "video-001.png", 2},
+	} {
+		f, err := os.Open("../testdata/lossless/" + tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := Decode(f)
+		f.Close()
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		g, err := os.Open("../testdata/" + tc.golden)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := png.Decode(g)
+		g.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.Bounds() != want.Bounds() {
+			t.Errorf("%s: bounds %v, want %v", tc.name, m.Bounds(), want.Bounds())
+			continue
+		}
+		b := want.Bounds()
+		mask := uint32(0xff) >> tc.pt << tc.pt << 8
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				r0, g0, b0, _ := m.At(x, y).RGBA()
+				r1, g1, b1, _ := want.At(x, y).RGBA()
+				if r0&mask != r1&mask || g0&mask != g1&mask || b0&mask != b1&mask {
+					t.Errorf("%s: pixel (%d, %d): got %v, want %v", tc.name, x, y, m.At(x, y), want.At(x, y))
+					break
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkDecodeLossless(b *testing.B) {
+	for _, tc := range []struct {
+		name        string
+		nComp, prec int
+		predictor   uint8
+	}{
+		{"Gray8", 1, 8, 1},
+		{"Gray12", 1, 12, 1},
+		{"Gray16", 1, 16, 1},
+		{"RGB8", 3, 8, 1},
+		{"RGB16", 3, 16, 7},
+	} {
+		w, h := 640, 480
+		planes := testPlanes("gradient", tc.nComp, w, h, tc.prec)
+		var buf bytes.Buffer
+		if err := encodeLossless(&buf, planes, w, h, losslessOptions{tc.prec, tc.predictor, 0, 0, false}); err != nil {
+			b.Fatal(err)
+		}
+		data := buf.Bytes()
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(w * h * tc.nComp))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := Decode(bytes.NewReader(data)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
