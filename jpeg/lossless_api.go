@@ -40,28 +40,24 @@ type LosslessComponent struct {
 // samples. Unlike Decode, it supports 2- and 4-component images and
 // returns the samples unscaled.
 func DecodeLossless(r io.Reader) (*Lossless, error) {
-	var d decoder
+	d := decoder{raw: true}
 	if _, err := d.decode(r, false); err != nil {
-		// Decode reports 2- and 4-component lossless images as
-		// unsupported only when converting to an image.Image.
-		if _, ok := err.(UnsupportedError); !ok || !d.lossless || d.nComp == 0 {
-			return nil, err
-		}
+		return nil, err
 	}
 	if !d.lossless {
 		return nil, UnsupportedError("not a lossless JPEG")
 	}
 	m := &Lossless{Width: d.width, Height: d.height, Precision: d.precision}
+	mask := uint16(1)<<d.precision - 1
 	for i := 0; i < d.nComp; i++ {
 		p := &d.lsPlanes[i]
 		if !p.decoded {
 			return nil, FormatError("missing SOS marker")
 		}
-		pix := make([]uint16, len(p.pix))
 		for j, v := range p.pix {
-			pix[j] = v << p.pt
+			p.pix[j] = v << p.pt & mask
 		}
-		m.Components = append(m.Components, LosslessComponent{d.comp[i].c, p.pt, pix})
+		m.Components = append(m.Components, LosslessComponent{d.comp[i].c, p.pt, p.pix})
 	}
 	return m, nil
 }
@@ -93,11 +89,18 @@ func EncodeLossless(w io.Writer, m *Lossless, o *LosslessOptions) error {
 	if opts.Predictor == 0 {
 		opts.Predictor = 1
 	}
+	if opts.Predictor < 1 || opts.Predictor > 7 {
+		return errors.New("jpeg: bad predictor")
+	}
+	if opts.PointTransform < 0 || opts.PointTransform >= m.Precision {
+		return errors.New("jpeg: bad point transform")
+	}
 	planes := make([][]uint16, len(m.Components))
+	ids := make([]uint8, len(m.Components))
 	for i, c := range m.Components {
-		planes[i] = c.Samples
+		planes[i], ids[i] = c.Samples, c.ID
 	}
 	return encodeLossless(w, planes, m.Width, m.Height, losslessOptions{
-		m.Precision, uint8(opts.Predictor), uint8(opts.PointTransform), opts.RestartRows, opts.SeparateScans,
+		m.Precision, uint8(opts.Predictor), uint8(opts.PointTransform), opts.RestartRows, opts.SeparateScans, ids,
 	})
 }

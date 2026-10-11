@@ -20,6 +20,8 @@ type losslessOptions struct {
 	// separateScans codes each component in its own scan, with its own
 	// Huffman table, instead of one interleaved scan.
 	separateScans bool
+	// ids are the component identifiers; nil means 1, 2, 3, 4.
+	ids []uint8
 }
 
 // encodeLossless writes a lossless (SOF3) JPEG image, as specified in
@@ -38,8 +40,19 @@ func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOption
 		return errors.New("jpeg: bad predictor")
 	case int(o.pt) >= o.precision:
 		return errors.New("jpeg: bad point transform")
-	case o.restart < 0 || o.restart*w > 0xffff:
+	case o.restart < 0 || o.restart > 0xffff/w:
 		return errors.New("jpeg: bad restart interval")
+	}
+	ids := o.ids
+	if ids == nil {
+		ids = []uint8{1, 2, 3, 4}[:nComp]
+	}
+	for c := range ids {
+		for j := 0; j < c; j++ {
+			if ids[j] == ids[c] {
+				return errors.New("jpeg: repeated component identifier")
+			}
+		}
 	}
 	shifted := make([][]uint16, nComp)
 	for c, p := range planes {
@@ -56,7 +69,7 @@ func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOption
 	}
 
 	// Each scan codes a set of components, interleaved, with one Huffman
-	// table (table H.2 uses the DC table selector).
+	// table (table B.3 uses the DC table selector).
 	var scans [][]int
 	if o.separateScans {
 		for c := 0; c < nComp; c++ {
@@ -77,7 +90,7 @@ func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOption
 	header = append(header, 0xff, sof3Marker, 0, byte(8+3*nComp), byte(o.precision),
 		byte(h>>8), byte(h), byte(w>>8), byte(w), byte(nComp))
 	for c := 0; c < nComp; c++ {
-		header = append(header, byte(c+1), 0x11, 0)
+		header = append(header, ids[c], 0x11, 0)
 	}
 	if o.restart > 0 {
 		// Section H.1.1: the interval is a whole number of MCU rows.
@@ -132,14 +145,14 @@ func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOption
 		}
 
 		// DHT for this scan, as DC table si, then the SOS header: Ss is the
-		// predictor, Se is 0 and Al is the point transform (table H.2).
+		// predictor, Se is 0 and Al is the point transform (table B.3).
 		th := byte(si & 3)
 		hdr := []byte{0xff, dhtMarker, 0, byte(2 + 1 + 16 + len(vals)), th}
 		hdr = append(hdr, counts[1:17]...)
 		hdr = append(hdr, vals...)
 		hdr = append(hdr, 0xff, sosMarker, 0, byte(6+2*len(comps)), byte(len(comps)))
 		for _, c := range comps {
-			hdr = append(hdr, byte(c+1), th<<4)
+			hdr = append(hdr, ids[c], th<<4)
 		}
 		hdr = append(hdr, o.predictor, 0, o.pt)
 		bw.write(hdr)

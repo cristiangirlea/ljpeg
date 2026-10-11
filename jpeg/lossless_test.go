@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/png"
+	"io"
 	"math/rand/v2"
+	"os"
 	"testing"
 )
 
@@ -96,7 +99,7 @@ func TestLosslessRoundTrip(t *testing.T) {
 									if separate && nComp == 1 {
 										continue
 									}
-									o := losslessOptions{precision, predictor, pt, restart, separate}
+									o := losslessOptions{precision, predictor, pt, restart, separate, nil}
 									name := fmt.Sprintf("P%d/n%d/%s/%dx%d/psv%d/pt%d/rst%d/sep%v",
 										precision, nComp, kind, w, h, predictor, pt, restart, separate)
 									testRoundTrip(t, name, planes, w, h, o)
@@ -137,7 +140,7 @@ func TestLosslessCategory16(t *testing.T) {
 	// The first sample is predicted as 32768, so 0 is a difference of -32768,
 	// which is coded as category 16 with no additional bits.
 	planes := [][]uint16{{0, 65535, 0, 65535}}
-	testRoundTrip(t, "category16", planes, 4, 1, losslessOptions{16, 1, 0, 0, false})
+	testRoundTrip(t, "category16", planes, 4, 1, losslessOptions{16, 1, 0, 0, false, nil})
 }
 
 func TestLosslessFullRange(t *testing.T) {
@@ -145,7 +148,7 @@ func TestLosslessFullRange(t *testing.T) {
 	for _, precision := range []int{2, 8, 12, 16} {
 		maxv := uint16(1<<precision - 1)
 		var buf bytes.Buffer
-		if err := encodeLossless(&buf, [][]uint16{{0, maxv}}, 2, 1, losslessOptions{precision, 1, 0, 0, false}); err != nil {
+		if err := encodeLossless(&buf, [][]uint16{{0, maxv}}, 2, 1, losslessOptions{precision, 1, 0, 0, false, nil}); err != nil {
 			t.Fatal(err)
 		}
 		m, err := Decode(bytes.NewReader(buf.Bytes()))
@@ -176,7 +179,7 @@ func TestLosslessDecodeConfig(t *testing.T) {
 	} {
 		var buf bytes.Buffer
 		planes := testPlanes("gradient", tc.nComp, 5, 3, tc.precision)
-		if err := encodeLossless(&buf, planes, 5, 3, losslessOptions{tc.precision, 1, 0, 0, false}); err != nil {
+		if err := encodeLossless(&buf, planes, 5, 3, losslessOptions{tc.precision, 1, 0, 0, false, nil}); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := DecodeConfig(bytes.NewReader(buf.Bytes()))
@@ -202,7 +205,7 @@ func TestLosslessPointTransformPerComponent(t *testing.T) {
 	w, h := 6, 4
 	planes := testPlanes("gradient", 3, w, h, 12)
 	var buf bytes.Buffer
-	if err := encodeLossless(&buf, planes[:1], w, h, losslessOptions{12, 1, 0, 0, false}); err != nil {
+	if err := encodeLossless(&buf, planes[:1], w, h, losslessOptions{12, 1, 0, 0, false, nil}); err != nil {
 		t.Fatal(err)
 	}
 	// Build a 3-component file by hand: one SOF, then the scans of three
@@ -210,7 +213,7 @@ func TestLosslessPointTransformPerComponent(t *testing.T) {
 	var out []byte
 	for c, pt := range []uint8{0, 2, 1} {
 		var b bytes.Buffer
-		if err := encodeLossless(&b, planes[c:c+1], w, h, losslessOptions{12, 4, pt, 0, false}); err != nil {
+		if err := encodeLossless(&b, planes[c:c+1], w, h, losslessOptions{12, 4, pt, 0, false, nil}); err != nil {
 			t.Fatal(err)
 		}
 		data := b.Bytes()
@@ -254,7 +257,7 @@ func TestLosslessErrors(t *testing.T) {
 		}
 		return buf.Bytes()
 	}
-	valid := encode(losslessOptions{12, 4, 0, 0, false})
+	valid := encode(losslessOptions{12, 4, 0, 0, false, nil})
 	sos := bytes.Index(valid, []byte{0xff, sosMarker})
 	sof := bytes.Index(valid, []byte{0xff, sof3Marker})
 	// The SOS header is FF DA, length (2 bytes), Ns, Cs/Td/Ta, Ss, Se, AhAl.
@@ -277,7 +280,7 @@ func TestLosslessErrors(t *testing.T) {
 		{"truncated", valid, func(b []byte) []byte { return b[:sos+20] }, nil},
 		// A restart interval that is not a multiple of the row width
 		// (section H.1.1).
-		{"restart interval", encode(losslessOptions{12, 4, 0, 2, false}), func(b []byte) []byte {
+		{"restart interval", encode(losslessOptions{12, 4, 0, 2, false, nil}), func(b []byte) []byte {
 			dri := bytes.Index(b, []byte{0xff, driMarker})
 			b[dri+4], b[dri+5] = 0, byte(w+1)
 			return b
@@ -302,28 +305,117 @@ func TestLosslessComponents(t *testing.T) {
 	for _, nComp := range []int{2, 4} {
 		planes := testPlanes("gradient", nComp, 7, 5, 16)
 		var buf bytes.Buffer
-		if err := encodeLossless(&buf, planes, 7, 5, losslessOptions{16, 1, 0, 0, false}); err != nil {
+		if err := encodeLossless(&buf, planes, 7, 5, losslessOptions{16, 1, 0, 0, false, nil}); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := DecodeConfig(bytes.NewReader(buf.Bytes()))
-		if err != nil || cfg.Width != 7 || cfg.Height != 5 {
-			t.Errorf("n%d: DecodeConfig = %v, %v", nComp, cfg, err)
-		}
-		if _, err := Decode(bytes.NewReader(buf.Bytes())); err == nil {
-			t.Errorf("n%d: Decode: got nil error, want UnsupportedError", nComp)
-		} else if _, ok := err.(UnsupportedError); !ok {
-			t.Errorf("n%d: Decode: got %v, want UnsupportedError", nComp, err)
-		}
-		// The planes themselves must have decoded correctly.
-		var d decoder
-		if _, err := d.decode(bytes.NewReader(buf.Bytes()), false); err == nil {
-			t.Errorf("n%d: decode: got nil error", nComp)
-		}
-		for c := range planes {
-			if !bytes.Equal(u16bytes(d.lsPlanes[c].pix), u16bytes(planes[c])) {
-				t.Errorf("n%d: component %d samples differ", nComp, c)
+		// Decode and DecodeConfig agree: neither can represent the image.
+		for name, f := range map[string]func() error{
+			"Decode":       func() error { _, err := Decode(bytes.NewReader(buf.Bytes())); return err },
+			"DecodeConfig": func() error { _, err := DecodeConfig(bytes.NewReader(buf.Bytes())); return err },
+		} {
+			if _, ok := f().(UnsupportedError); !ok {
+				t.Errorf("n%d: %s: got %v, want UnsupportedError", nComp, name, f())
 			}
 		}
+		// The raw API returns the samples.
+		m, err := DecodeLossless(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("n%d: DecodeLossless: %v", nComp, err)
+		}
+		if m.Width != 7 || m.Height != 5 || m.Precision != 16 || len(m.Components) != nComp {
+			t.Errorf("n%d: got %dx%d P%d with %d components", nComp, m.Width, m.Height, m.Precision, len(m.Components))
+		}
+		for c := range planes {
+			if m.Components[c].ID != uint8(c+1) || !bytes.Equal(u16bytes(m.Components[c].Samples), u16bytes(planes[c])) {
+				t.Errorf("n%d: component %d (ID %d) samples differ", nComp, c, m.Components[c].ID)
+			}
+		}
+	}
+}
+
+// TestLosslessRawAPI round-trips images through the exported API, and checks
+// that it reports the point transform, rejects what Decode rejects, and
+// keeps samples within the precision on hostile input.
+func TestLosslessRawAPI(t *testing.T) {
+	for _, nComp := range []int{1, 2, 3, 4} {
+		planes := testPlanes("gradient", nComp, 9, 4, 12)
+		in := &Lossless{Width: 9, Height: 4, Precision: 12}
+		for c, p := range planes {
+			in.Components = append(in.Components, LosslessComponent{ID: uint8(10 + c), Samples: p})
+		}
+		var buf bytes.Buffer
+		if err := EncodeLossless(&buf, in, &LosslessOptions{Predictor: 5, PointTransform: 2, RestartRows: 2, SeparateScans: nComp > 1}); err != nil {
+			t.Fatal(err)
+		}
+		out, err := DecodeLossless(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for c := range planes {
+			oc := out.Components[c]
+			if oc.ID != uint8(10+c) || oc.PointTransform != 2 {
+				t.Errorf("n%d: component %d: ID %d pt %d, want ID %d pt 2", nComp, c, oc.ID, oc.PointTransform, 10+c)
+			}
+			for i, v := range planes[c] {
+				if oc.Samples[i] != v>>2<<2 {
+					t.Fatalf("n%d: component %d sample %d: got %d, want %d", nComp, c, i, oc.Samples[i], v>>2<<2)
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		o    *LosslessOptions
+	}{{"predictor 8", &LosslessOptions{Predictor: 8}}, {"predictor 257", &LosslessOptions{Predictor: 257}}, {"pt 256", &LosslessOptions{PointTransform: 256}}} {
+		in := &Lossless{Width: 2, Height: 2, Precision: 8, Components: []LosslessComponent{{Samples: make([]uint16, 4)}}}
+		if err := EncodeLossless(io.Discard, in, tc.o); err == nil {
+			t.Errorf("EncodeLossless %s: got nil error", tc.name)
+		}
+	}
+
+	// A lossy file is not a lossless JPEG.
+	var lossy bytes.Buffer
+	Encode(&lossy, image.NewGray(image.Rect(0, 0, 8, 8)), nil)
+	if _, err := DecodeLossless(bytes.NewReader(lossy.Bytes())); err == nil {
+		t.Error("DecodeLossless(lossy): got nil error")
+	}
+
+	// A subsampled multi-component frame is unsupported, through every entry point.
+	planes := testPlanes("gradient", 3, 4, 4, 8)
+	var buf bytes.Buffer
+	if err := encodeLossless(&buf, planes, 4, 4, losslessOptions{8, 1, 0, 0, false, nil}); err != nil {
+		t.Fatal(err)
+	}
+	b := buf.Bytes()
+	sof := bytes.Index(b, []byte{0xff, sof3Marker})
+	b[sof+11] = 0x21 // First component H=2.
+	for name, f := range map[string]func() error{
+		"Decode":         func() error { _, err := Decode(bytes.NewReader(b)); return err },
+		"DecodeConfig":   func() error { _, err := DecodeConfig(bytes.NewReader(b)); return err },
+		"DecodeLossless": func() error { _, err := DecodeLossless(bytes.NewReader(b)); return err },
+	} {
+		if _, ok := f().(UnsupportedError); !ok {
+			t.Errorf("subsampled: %s: got %v, want UnsupportedError", name, f())
+		}
+	}
+
+	// A hostile difference can reconstruct a sample above the precision
+	// modulo 2^16; the raw API must still report samples below 1<<P.
+	// Category 16 adds 32768 to the predicted 128 of an 8-bit image.
+	hostile := []byte{
+		0xff, soiMarker,
+		0xff, sof3Marker, 0, 8 + 3, 8, 0, 1, 0, 1, 1, 1, 0x11, 0,
+		0xff, dhtMarker, 0, 2 + 1 + 16 + 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16,
+		0xff, sosMarker, 0, 6 + 2, 1, 1, 0, 1, 0, 0,
+		0x7f, // code 0 (category 16), then padding.
+		0xff, eoiMarker,
+	}
+	m, err := DecodeLossless(bytes.NewReader(hostile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := m.Components[0].Samples[0]; v >= 1<<8 {
+		t.Errorf("hostile sample = %d, want < 256", v)
 	}
 }
 
@@ -354,5 +446,88 @@ func TestLosslessHugeHeader(t *testing.T) {
 	// this did not run out of memory, but also check nothing excessive.
 	if allocs > 1000 {
 		t.Errorf("too many allocations: %v", allocs)
+	}
+}
+
+// TestDecodeLosslessFiles decodes the lossless files in testdata/lossless,
+// which were generated from the upstream PNG images, and compares them with
+// those images.
+func TestDecodeLosslessFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name, golden string
+		pt           uint
+	}{
+		{"video-005.gray.psv1.jpeg", "video-005.gray.png", 0},
+		{"video-005.gray.psv7.rst.jpeg", "video-005.gray.png", 0},
+		{"video-001.rgb.psv4.jpeg", "video-001.png", 0},
+		{"video-001.rgb.psv6.sep.jpeg", "video-001.png", 0},
+		{"video-001.rgb.psv1.pt2.jpeg", "video-001.png", 2},
+	} {
+		f, err := os.Open("../testdata/lossless/" + tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := Decode(f)
+		f.Close()
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		g, err := os.Open("../testdata/" + tc.golden)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := png.Decode(g)
+		g.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.Bounds() != want.Bounds() {
+			t.Errorf("%s: bounds %v, want %v", tc.name, m.Bounds(), want.Bounds())
+			continue
+		}
+		b := want.Bounds()
+		mask := uint32(0xff) >> tc.pt << tc.pt << 8
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				r0, g0, b0, _ := m.At(x, y).RGBA()
+				r1, g1, b1, _ := want.At(x, y).RGBA()
+				if r0&mask != r1&mask || g0&mask != g1&mask || b0&mask != b1&mask {
+					t.Errorf("%s: pixel (%d, %d): got %v, want %v", tc.name, x, y, m.At(x, y), want.At(x, y))
+					break
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkDecodeLossless(b *testing.B) {
+	for _, tc := range []struct {
+		name        string
+		nComp, prec int
+		predictor   uint8
+	}{
+		{"Gray8", 1, 8, 1},
+		{"Gray12", 1, 12, 1},
+		{"Gray16", 1, 16, 1},
+		{"RGB8", 3, 8, 1},
+		{"RGB16", 3, 16, 7},
+	} {
+		w, h := 640, 480
+		planes := testPlanes("gradient", tc.nComp, w, h, tc.prec)
+		var buf bytes.Buffer
+		if err := encodeLossless(&buf, planes, w, h, losslessOptions{tc.prec, tc.predictor, 0, 0, false, nil}); err != nil {
+			b.Fatal(err)
+		}
+		data := buf.Bytes()
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(w * h * tc.nComp))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := Decode(bytes.NewReader(data)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
