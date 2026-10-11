@@ -8,10 +8,10 @@
 package jpeg
 
 import (
+	"github.com/cristiangirlea/ljpeg/internal/imageutil"
 	"image"
 	"image/color"
 	"io"
-	"ljpegmvp/internal/imageutil"
 )
 
 // A FormatError reports that the input is not a valid JPEG.
