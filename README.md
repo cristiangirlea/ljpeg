@@ -31,20 +31,38 @@ Not supported, and rejected with `UnsupportedError`: subsampled components
 rare outside specific camera formats and are better left to raw-file
 libraries.
 
-## API
+## Usage
 
-`jpeg.Decode` and `jpeg.DecodeConfig` accept lossless images with 1 or 3
-components and return `*image.Gray`, `*image.Gray16`, `*image.RGBA` or
-`*image.RGBA64`, with samples scaled to the full range as `image/png` does.
-No color conversion is applied: 3-component lossless data is returned as
-coded.
+```
+go get github.com/cristiangirlea/ljpeg
+```
+
+The package is a drop-in replacement for `image/jpeg`. `jpeg.Decode` and
+`jpeg.DecodeConfig` accept lossless images with 1 or 3 components and return
+`*image.Gray`, `*image.Gray16`, `*image.RGBA` or `*image.RGBA64`, with samples
+scaled to the full range as `image/png` does. No color conversion is applied:
+3-component lossless data is returned as coded.
+
+```go
+import "github.com/cristiangirlea/ljpeg/jpeg"
+
+m, err := jpeg.Decode(f)          // a 12-bit CT scan comes back as *image.Gray16
+```
 
 For DICOM and DNG, which need the samples as coded, there is a raw API:
 
 ```go
-m, err := jpeg.DecodeLossless(r)            // *jpeg.Lossless: Width, Height, Precision, Components
-err = jpeg.EncodeLossless(w, m, &jpeg.LosslessOptions{Predictor: 1})
+m, err := jpeg.DecodeLossless(f)  // *jpeg.Lossless: Width, Height, Precision, Components
+for _, c := range m.Components {
+	// c.Samples holds Width*Height samples in [0, 1<<m.Precision), row-major.
+	// A DICOM reader with PixelRepresentation 1 sign-extends them from
+	// m.Precision bits; a DNG reader reshapes the flat stream by the tile width.
+}
+
+err = jpeg.EncodeLossless(w, m, &jpeg.LosslessOptions{Predictor: 4})
 ```
+
+Runnable examples are in `jpeg/example_lossless_test.go`.
 
 `Lossless` carries one plane per component at the frame's own precision, so a
 DICOM reader can apply `PixelRepresentation`, and a DNG reader can reshape a
@@ -107,4 +125,8 @@ comparison matters: it is the only check with an independent implementation.
 
 ## License
 
-BSD 3-Clause, the same as Go. See `LICENSE`.
+BSD 3-Clause, the same as Go and golang.org/x/image; see `LICENSE`. `PATENTS`
+is Go's patent grant, which covers the code taken from Go.
+
+If a program links both `image/jpeg` and this package, both register the
+"jpeg" format with `image.Decode`, and the one initialized first is used.
