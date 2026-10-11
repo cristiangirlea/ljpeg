@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ljpegmvp/jpeg"
+	"github.com/cristiangirlea/ljpeg/jpeg"
 )
 
 func main() {
