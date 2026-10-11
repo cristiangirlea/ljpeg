@@ -10,8 +10,8 @@ package jpeg
 import (
 	"image"
 	"image/color"
-	"image/internal/imageutil"
 	"io"
+	"ljpegmvp/internal/imageutil"
 )
 
 // A FormatError reports that the input is not a valid JPEG.
@@ -50,6 +50,7 @@ const (
 	sof0Marker = 0xc0 // Start Of Frame (Baseline Sequential).
 	sof1Marker = 0xc1 // Start Of Frame (Extended Sequential).
 	sof2Marker = 0xc2 // Start Of Frame (Progressive).
+	sof3Marker = 0xc3 // Start Of Frame (Lossless).
 	dhtMarker  = 0xc4 // Define Huffman Table.
 	rst0Marker = 0xd0 // ReSTart (0).
 	rst7Marker = 0xd7 // ReSTart (7).
@@ -140,6 +141,11 @@ type decoder struct {
 	// extended, as per section 4.11.
 	baseline    bool
 	progressive bool
+	lossless    bool
+
+	precision int                     // Sample precision in bits, as per section B.2.2.
+	lsPix     [maxComponents][]uint16 // Lossless samples, one plane per component.
+	lsShift   uint8                   // Lossless point transform.
 
 	jfif                bool
 	adobeTransformValid bool
@@ -321,8 +327,17 @@ func (d *decoder) processSOF(n int) error {
 	if err := d.readFull(d.tmp[:n]); err != nil {
 		return err
 	}
-	// We only support 8-bit precision.
-	if d.tmp[0] != 8 {
+	// We only support 8-bit precision, except for lossless images, which
+	// may have 2 to 16 bits per sample (section H.1.1).
+	d.precision = int(d.tmp[0])
+	if d.lossless {
+		if d.precision < 2 || 16 < d.precision {
+			return FormatError("bad precision")
+		}
+		if d.nComp == 4 {
+			return UnsupportedError("lossless 4-component image")
+		}
+	} else if d.precision != 8 {
 		return UnsupportedError("precision")
 	}
 	d.height = int(d.tmp[1])<<8 + int(d.tmp[2])
@@ -603,9 +618,10 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		}
 
 		switch marker {
-		case sof0Marker, sof1Marker, sof2Marker:
+		case sof0Marker, sof1Marker, sof2Marker, sof3Marker:
 			d.baseline = marker == sof0Marker
 			d.progressive = marker == sof2Marker
+			d.lossless = marker == sof3Marker
 			err = d.processSOF(n)
 			if configOnly && d.jfif {
 				return nil, err
@@ -655,6 +671,9 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		if err := d.reconstructProgressiveImage(); err != nil {
 			return nil, err
 		}
+	}
+	if d.lossless {
+		return d.losslessImage()
 	}
 	if d.img1 != nil {
 		return d.img1, nil
@@ -804,6 +823,13 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 	var d decoder
 	if _, err := d.decode(r, true); err != nil {
 		return image.Config{}, err
+	}
+	if d.lossless && d.nComp != 0 {
+		return image.Config{
+			ColorModel: d.losslessColorModel(),
+			Width:      d.width,
+			Height:     d.height,
+		}, nil
 	}
 	switch d.nComp {
 	case 1:
