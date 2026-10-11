@@ -16,17 +16,20 @@ type losslessOptions struct {
 	precision int   // Sample precision, 2 to 16.
 	predictor uint8 // Predictor selection value, 1 to 7.
 	pt        uint8 // Point transform.
-	restart   int   // Restart interval in MCUs, or 0 for none.
+	restart   int   // Restart interval in rows, or 0 for none.
+	// separateScans codes each component in its own scan, with its own
+	// Huffman table, instead of one interleaved scan.
+	separateScans bool
 }
 
 // encodeLossless writes a lossless (SOF3) JPEG image, as specified in
 // Annex H. planes holds one slice of w*h samples per component, in
-// row-major order. Components are interleaved in a single scan.
+// row-major order.
 func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOptions) error {
 	nComp := len(planes)
 	switch {
-	case nComp != 1 && nComp != 3:
-		return errors.New("jpeg: lossless images must have 1 or 3 components")
+	case nComp < 1 || nComp > 4:
+		return errors.New("jpeg: lossless images must have 1 to 4 components")
 	case w < 1 || h < 1 || w > 0xffff || h > 0xffff:
 		return errors.New("jpeg: bad image dimensions")
 	case o.precision < 2 || o.precision > 16:
@@ -35,7 +38,7 @@ func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOption
 		return errors.New("jpeg: bad predictor")
 	case int(o.pt) >= o.precision:
 		return errors.New("jpeg: bad point transform")
-	case o.restart < 0 || o.restart > 0xffff:
+	case o.restart < 0 || o.restart*w > 0xffff:
 		return errors.New("jpeg: bad restart interval")
 	}
 	shifted := make([][]uint16, nComp)
@@ -52,49 +55,19 @@ func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOption
 		}
 	}
 
-	// Compute the differences in scan order, using the same prediction rules
-	// as the decoder, and count how often each category occurs.
-	diffs := make([]int32, 0, nComp*w*h)
-	var freq [17]int
-	initial := int32(1) << (o.precision - int(o.pt) - 1)
-	start, startRow, mcu := 0, 0, 0
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			i := y*w + x
-			for c := 0; c < nComp; c++ {
-				pix := shifted[c]
-				var pred int32
-				switch {
-				case i == start:
-					pred = initial
-				case y == startRow:
-					pred = int32(pix[i-1])
-				case x == 0:
-					pred = int32(pix[i-w])
-				default:
-					pred = predict(o.predictor, pix[i-1], pix[i-w], pix[i-w-1])
-				}
-				d := int32(int16(uint16(int32(pix[i]) - pred)))
-				diffs = append(diffs, d)
-				freq[category(d)]++
-			}
-			mcu++
-			if o.restart > 0 && mcu%o.restart == 0 && mcu < w*h {
-				start, startRow = mcu, mcu/w
-			}
+	// Each scan codes a set of components, interleaved, with one Huffman
+	// table (table H.2 uses the DC table selector).
+	var scans [][]int
+	if o.separateScans {
+		for c := 0; c < nComp; c++ {
+			scans = append(scans, []int{c})
 		}
-	}
-	counts, vals := optimalHuffman(freq[:])
-	var codes [17]uint16
-	var lengths [17]uint8
-	code, k := uint16(0), 0
-	for l := 1; l <= 16; l++ {
-		for j := 0; j < int(counts[l]); j++ {
-			codes[vals[k]], lengths[vals[k]] = code, uint8(l)
-			code++
-			k++
+	} else {
+		all := make([]int, nComp)
+		for c := range all {
+			all[c] = c
 		}
-		code <<= 1
+		scans = [][]int{all}
 	}
 
 	bw := &bitWriter{w: bufio.NewWriter(out)}
@@ -106,38 +79,89 @@ func encodeLossless(out io.Writer, planes [][]uint16, w, h int, o losslessOption
 	for c := 0; c < nComp; c++ {
 		header = append(header, byte(c+1), 0x11, 0)
 	}
-	// DHT: one table, used for every component.
-	header = append(header, 0xff, dhtMarker, 0, byte(2+1+16+len(vals)), 0x00)
-	header = append(header, counts[1:17]...)
-	header = append(header, vals...)
 	if o.restart > 0 {
-		header = append(header, 0xff, driMarker, 0, 4, byte(o.restart>>8), byte(o.restart))
+		// Section H.1.1: the interval is a whole number of MCU rows.
+		ri := o.restart * w
+		header = append(header, 0xff, driMarker, 0, 4, byte(ri>>8), byte(ri))
 	}
-	// SOS: Ss is the predictor and Al is the point transform (table H.2).
-	header = append(header, 0xff, sosMarker, 0, byte(6+2*nComp), byte(nComp))
-	for c := 0; c < nComp; c++ {
-		header = append(header, byte(c+1), 0x00)
-	}
-	header = append(header, o.predictor, 0, o.pt)
 	bw.write(header)
 
-	rst := byte(0)
-	for k, d := range diffs {
-		if o.restart > 0 && k > 0 && k%(o.restart*nComp) == 0 {
-			bw.flush()
-			bw.write([]byte{0xff, rst0Marker + rst})
-			rst = (rst + 1) & 7
-		}
-		t := category(d)
-		bw.emit(uint32(codes[t]), uint(lengths[t]))
-		if 0 < t && t < 16 {
-			if d < 0 {
-				d += 1<<t - 1
+	for si, comps := range scans {
+		// Compute the differences in scan order, using the same prediction
+		// rules as the decoder, and count how often each category occurs.
+		diffs := make([]int32, 0, len(comps)*w*h)
+		var freq [17]int
+		initial := int32(1) << (o.precision - int(o.pt) - 1)
+		startRow := 0
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				i := y*w + x
+				for _, c := range comps {
+					pix := shifted[c]
+					var pred int32
+					switch {
+					case y == startRow && x == 0:
+						pred = initial
+					case y == startRow:
+						pred = int32(pix[i-1])
+					case x == 0:
+						pred = int32(pix[i-w])
+					default:
+						pred = predict(o.predictor, pix[i-1], pix[i-w], pix[i-w-1])
+					}
+					d := int32(int16(uint16(int32(pix[i]) - pred)))
+					diffs = append(diffs, d)
+					freq[category(d)]++
+				}
 			}
-			bw.emit(uint32(d), uint(t))
+			if o.restart > 0 && (y+1)%o.restart == 0 {
+				startRow = y + 1
+			}
 		}
+		counts, vals := optimalHuffman(freq[:])
+		var codes [17]uint16
+		var lengths [17]uint8
+		code, k := uint16(0), 0
+		for l := 1; l <= 16; l++ {
+			for j := 0; j < int(counts[l]); j++ {
+				codes[vals[k]], lengths[vals[k]] = code, uint8(l)
+				code++
+				k++
+			}
+			code <<= 1
+		}
+
+		// DHT for this scan, as DC table si, then the SOS header: Ss is the
+		// predictor, Se is 0 and Al is the point transform (table H.2).
+		th := byte(si & 3)
+		hdr := []byte{0xff, dhtMarker, 0, byte(2 + 1 + 16 + len(vals)), th}
+		hdr = append(hdr, counts[1:17]...)
+		hdr = append(hdr, vals...)
+		hdr = append(hdr, 0xff, sosMarker, 0, byte(6+2*len(comps)), byte(len(comps)))
+		for _, c := range comps {
+			hdr = append(hdr, byte(c+1), th<<4)
+		}
+		hdr = append(hdr, o.predictor, 0, o.pt)
+		bw.write(hdr)
+
+		rst, perInterval := byte(0), o.restart*w*len(comps)
+		for k, d := range diffs {
+			if perInterval > 0 && k > 0 && k%perInterval == 0 {
+				bw.flush()
+				bw.write([]byte{0xff, rst0Marker + rst})
+				rst = (rst + 1) & 7
+			}
+			t := category(d)
+			bw.emit(uint32(codes[t]), uint(lengths[t]))
+			if 0 < t && t < 16 {
+				if d < 0 {
+					d += 1<<t - 1
+				}
+				bw.emit(uint32(d), uint(t))
+			}
+		}
+		bw.flush()
 	}
-	bw.flush()
 	bw.write([]byte{0xff, eoiMarker})
 	if bw.err != nil {
 		return bw.err
