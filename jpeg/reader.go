@@ -145,6 +145,7 @@ type decoder struct {
 
 	precision int // Sample precision in bits, as per section B.2.2.
 	lsPlanes  [maxComponents]losslessPlane
+	raw       bool // Keep the lossless planes instead of building an image.
 
 	jfif                bool
 	adobeTransformValid bool
@@ -687,6 +688,9 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		}
 	}
 	if d.lossless {
+		if d.raw {
+			return nil, nil
+		}
 		return d.losslessImage()
 	}
 	if d.img1 != nil {
@@ -839,6 +843,9 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 		return image.Config{}, err
 	}
 	if d.lossless && d.nComp != 0 {
+		if d.nComp != 1 && d.nComp != 3 {
+			return image.Config{}, UnsupportedError("lossless image with this number of components")
+		}
 		return image.Config{
 			ColorModel: d.losslessColorModel(),
 			Width:      d.width,

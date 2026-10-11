@@ -7,7 +7,7 @@ This is a copy of the Go standard library's `image/jpeg` package, with
 support for lossless JPEG added: the Huffman-coded, non-hierarchical lossless
 process of ITU-T T.81 Annex H (SOF3), as used by DICOM medical images
 (transfer syntaxes 1.2.840.10008.1.2.4.57 and .70) and by camera raw files
-(DNG, CR2).
+(DNG).
 
 It exists so that the question raised on the issue, whether this belongs in
 `image/jpeg` or in `golang.org/x/image`, can be answered by looking at working
@@ -65,9 +65,12 @@ check, through `testdata/crosscheck.sh`:
 - Go encodes, libjpeg-turbo decodes: byte-exact on the same 280, plus
   one-scan-per-component files.
 - 2- and 4-component streams: byte-exact against libjpeg-turbo's library
-  API (`jpeg16_read_scanlines`), which its command-line tools cannot write.
+  API (`jpeg_read_scanlines` and `jpeg16_read_scanlines`), which its
+  command-line tools cannot write. The small C program for this is in
+  `tools/ljdecraw/`.
 
-Real files, all freely redistributable, decode byte-exact to libjpeg-turbo:
+Real files, all freely redistributable, were decoded and compared with
+libjpeg-turbo's library API, sample for sample:
 
 | File | Source | Content |
 |---|---|---|
@@ -76,16 +79,20 @@ Real files, all freely redistributable, decode byte-exact to libjpeg-turbo:
 | `JPEGLossless_1s_1f_u_16_12.dcm` | pylibjpeg-data | DICOM .57, 12-bit, predictor 7 |
 | `JPEGLosslessP14SV1_1s_1f_u_16_16.dcm` | pylibjpeg-data | DICOM .70, 16-bit |
 | `JPEGLossless_1s_1f_i_16_16_bad.dcm` | pylibjpeg-data | DICOM .57, signed 16-bit |
+| `JPGLosslessP14SV1_1s_1f_8b.dcm` | pydicom-data | DICOM .70, 8-bit |
 | Adobe DNG Converter, Canon 5D III | raw.pixls.us (CC0) | 384 CFA tiles, 2-component 16-bit; 475 linear RGB tiles |
 | Apple iPhone 12 Pro ProRAW | raw.pixls.us (CC0) | 64 tiles, 12-bit RGB, predictor 7 |
-| Blackmagic Micro Cinema Camera | raw.pixls.us (CC0) | 2 tiles, 12-bit, predictor 6; libjpeg-turbo rejects this file's Huffman table, Go decodes it |
+| Blackmagic Micro Cinema Camera | raw.pixls.us (CC0) | 2 tiles, 12-bit, predictor 6; libjpeg-turbo rejects this file's Huffman table, so Go's output (plausible 12-bit Bayer data) is unverified |
 
 The Adobe DNG samples were also compared with the uncompressed DNG of the
 same image.
 
-The Go-only tests (`go test ./jpeg/`) round-trip 8,064 combinations through
-the encoder and decoder, and the decoder is fuzzed with the same harness as
-upstream (`go test -fuzz=FuzzDecode ./jpeg/`).
+The Go-only tests (`go test ./jpeg/`) round-trip 12,096 combinations through
+the encoder and decoder, and the decoder was fuzzed for 30 minutes (287
+million inputs) with the same harness as upstream
+(`go test -fuzz=FuzzDecode ./jpeg/`). Those tests share the predictor and
+category code between encoder and decoder, which is why the libjpeg-turbo
+comparison matters: it is the only check with an independent implementation.
 
 ## Layout
 

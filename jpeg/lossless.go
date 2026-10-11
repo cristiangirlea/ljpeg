@@ -7,6 +7,7 @@ package jpeg
 import (
 	"image"
 	"image/color"
+	"math"
 )
 
 // A lossless image is decoded into one plane of samples per component. The
@@ -21,7 +22,7 @@ type losslessPlane struct {
 // sample is coded as the difference from a prediction made from its
 // already-decoded neighbors: Ra to the left, Rb above and Rc above-left.
 func (d *decoder) processLosslessSOS(scan []scanComponent, ss, se, ahal uint8) error {
-	// Table H.2: Ss is the predictor, Se is 0, Ah is 0 and Al is the point
+	// Table B.3: Ss is the predictor, Se is 0, Ah is 0 and Al is the point
 	// transform.
 	if ss < 1 || 7 < ss {
 		return FormatError("bad predictor selection value")
@@ -155,6 +156,9 @@ func (d *decoder) losslessImage() (image.Image, error) {
 		}
 	}
 	w, h := d.width, d.height
+	if uint64(w)*uint64(h)*8 > math.MaxInt {
+		return nil, UnsupportedError("image too large")
+	}
 	r := image.Rect(0, 0, w, h)
 	maxSample := uint32(1)<<d.precision - 1
 	// sample returns component c of pixel i, scaled to the range 0..maxOut.
